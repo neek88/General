@@ -1,0 +1,69 @@
+Useful networking commands
+
+TCP dump on our ethernet interface (insignia usb-c:eth adapter):
+> sudo tcpdump -i enx3c18a0d36857
+
+Setup ip address for our ethernet interface:
+ifconfig enx3c18a0d36857 10.0.0.1 netmask 255.255.255.0 
+
+Change network interface name ---------------------
+> ifconfig peth0 down  
+> ip link set peth0 name eth0  
+> ifconfig eth0 up
+
+Enable/ disable TX UDP checksum off loading: -------
+shows incorrect UDP checksum in wireshark, since Checksum is calculated on NIC
+> ethtool --show-offload ethX
+> ethtool --offload ethX rx off tx off
+
+disable SSDP (port 1900)/ MDNS (port SSDP) communication (how to do in/ out?) --
+- make sure firewall is turned on
+> sudo ufw deny 5353/udp	
+> sudo ufw deny 1900/udp	
+> sudo ufw deny out on enx3c18a0d36857 to any port 1900 proto udp
+
+
+Setup DHCP server: ------------
+> sudo apt install isc-dhcp-server
+
+> edit "/etc/dhcp/dhcpd.conf"
+# minimal sample /etc/dhcp/dhcpd.conf
+default-lease-time 600;
+max-lease-time 7200;
+
+subnet 192.168.1.0 netmask 255.255.255.0 {
+ range 192.168.1.150 192.168.1.200;
+ option routers 192.168.1.254;
+ option domain-name-servers 192.168.1.1, 192.168.1.2;
+ option domain-name "mydomain.example";
+}
+
+> edit 'etc/defaul/isc-dhcp-server"
+INTERFACESv4="eth0" (or enx3c18a0d36857)
+
+> Check if running ok
+sudo systemctl restart isc-dhcp-server.service
+sudo systemctl status isc-dhcp-server.service
+
+
+/* IPTABLES Commands */ 
+> allow all firewall rules
+iptables -P INPUT ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -P FORWARD ACCEPT
+
+> flush firewall rules
+iptables -F INPUT
+iptables -F OUTPUT
+iptables -F FORWARD
+
+> allow packet forwarding between wlan and lan (eth0)
+sudo iptables -A FORWARD -i wlp59s0 -o enx3c18a0d36857 -m state --state ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A FORWARD -i enx3c18a0d36857 -o wlp59s0 -j ACCEPT
+sudo iptables -t nat -A POSTROUTING -o wlp59s0 -j MASQUERADE
+
+> remove rule
+sudo iptables -D <rest of rule>
+
+> list all rules (ipv4)
+sudo iptables -S    

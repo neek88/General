@@ -1,0 +1,230 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import math as m
+from modules import BPSKGen
+from modules import SigUtil
+from modules import FilterGen
+from modules import FiltUtil
+
+#############
+### Setup ###
+#############
+
+## plot settings
+PLT_STD_TIME  = 1
+PLT_DS_TIME   = 1
+PLT_STD_FREQ  = 1
+PLT_RECON     = 1
+
+## useful objects
+f = FilterGen.FilterGen()
+ft = FiltUtil.FiltUtil()
+b = BPSKGen.BPSKGen()
+s = SigUtil.SigUtil()
+
+#######################
+### Signal Creation ###
+#######################
+
+## custom params
+f0 = 100e6
+BW = 50e6
+T0 = 1/ f0
+N_paths = 8                 ## number of paths/ number of 'generators'
+chip_rate = 1.024e6
+chip_number = 256
+prn_fac = 10
+boc_fac = 0
+boc_phase = 0
+
+## digitals params
+sample_clk = 307.2e6
+sample_rate = sample_clk * N_paths
+PLT_RANGE = 10000
+
+## digitals bpsk signal
+d_bpsk, d_bpsk_t = b.digitals_bpsk_mod(sample_clk, f0, N_paths, chip_rate, chip_number, prn_fac, boc_fac, boc_phase)
+center_freq = b.digitals_center_freq
+bpsk_time_range = chip_number / chip_rate
+
+## length of BPSK signal
+Ns = len(d_bpsk)
+
+## create bpfilter directly
+Nk = 512
+
+## kernel freq domain
+kernel_f, kernel_freq = ft.single_bp_filter_kernel(center_freq, BW, sample_rate, Nk)
+
+## kernel time domain
+kernel_t = np.fft.ifft(kernel_f)
+kernel_time_range = Nk / sample_rate
+kernel_time = (1/sample_rate) * np.array(list(np.linspace(1,Nk//2,Nk//2)) + list(np.linspace(-Nk//2,-1,Nk//2)))
+
+## determine length of convolution signals + time arguments
+# length of convolution between signal and kernel
+conv_len = Ns + Nk - 1
+conv_time_range = bpsk_time_range + kernel_time_range
+
+## convolve BPSK with kernel
+conv_time = np.linspace(0,conv_time_range,conv_len)
+conv = np.convolve(d_bpsk, kernel_t)
+
+## Take FFT of the BPSK signal / Convolution result
+bpsk_mag, bpsk_phase = ft.complex_to_phasor(np.abs(np.fft.fft(d_bpsk)))
+bpsk_freq = sample_rate * np.fft.fftfreq(bpsk_mag.size)
+
+conv_mag, conv_phase = ft.complex_to_phasor(np.abs(np.fft.fft(conv)))
+conv_freq = sample_rate * np.fft.fftfreq(conv_mag.size)
+
+############################
+### Downsampled BP Filt  ###
+############################
+
+## filter parameters
+N_lanes_ds = 4                    ## how many lanes of traffic are being generated
+Nk_ds = Nk // N_lanes_ds          ## sample length of downsampled kernel
+Ns_ds = Ns // N_lanes_ds          ## sample length of downsampled BPSK signal
+fs = sample_rate // N_lanes_ds    ## sample generation rate of system
+fc1 = 100e6                       ## center freq. 1 
+fc2 = 200e6                       ## center freq. 2
+BW = 20e6                         ## bandwidth of filter 
+
+## kernel scaling
+Nd = 15
+Ndy = 2 * Nd
+M = pow(2, Ndy) - 1      ## scaling factor for kernel values
+
+## generate single BPF kernel
+k_ds, k_ds_freq = ft.single_bp_filter_kernel(fc1, BW, fs, Nk_ds)
+
+## Generate double BPF kernel
+#bpf_ft, bpf_freq = s.gen_double_bp_filter_kernel(fc1, BW, fc2, BW, fs, Nk_ds)
+
+## Take iFFT, generating the time-domain response
+k_ds_t = np.fft.ifft(k_ds)
+k_ds_t = k_ds_t.real
+k_ds_time = (1/fs) * np.array(list(np.linspace(1,Nk_ds//2,Nk_ds//2)) + list(np.linspace(-Nk_ds//2,-1,Nk_ds//2)))
+
+kernel_ds_time_range = Nk_ds / fs
+
+## format kernel data for vhdl testing
+k_ds_t_fm = ft.format_kernel_values(k_ds_t, M)
+
+## generate test data file
+ft.gen_format_kernel_data("output_files/conv_filter_def.txt", k_ds_t_fm)
+
+########################
+### Downsampled BPSK ###
+########################
+
+# down sample signal by splitting into 'N_paths' seperate paths
+s_ds = s.down_sample_split_path(d_bpsk, N_lanes_ds)
+
+###############################
+### Downsampled Convolution ###
+###############################
+
+# convolve down-sampled signals with kernel
+s_ds_conv = list()
+for i in range(N_lanes_ds):
+  s_ds_conv.append(list(np.convolve(s_ds[i],k_ds_t)))
+
+# length of convolution between down-sampled signal / kernel
+conv_ds_len = Ns_ds + Nk_ds - 1
+bpsk_ds_time_range = bpsk_time_range/ N_lanes_ds
+conv_ds_time_range = (bpsk_time_range+kernel_time_range)/N_lanes_ds
+
+# time arrays for down-sampled signal / down-sampled convolution
+bpsk_ds_time = np.linspace(0, bpsk_ds_time_range, Ns_ds)
+conv_ds_time = np.linspace(0, conv_ds_time_range, conv_ds_len)
+kernel_ds_time = np.linspace(0, kernel_ds_time_range, Nk_ds)
+
+#######################################
+### Recombine multilane convolution ###
+#######################################
+
+print("Signal properties:")
+print("k_ds_t len:",len(k_ds_t)," sa_ds len:",len(s_ds[0])," sa_ds_conv len:",len(s_ds_conv[0]))
+print("Ns_ds: ",Ns_ds,"Nk_ds: ",Nk_ds)
+
+ds_conv_alt = s.multi_lane_conv_recon_four(conv_len, conv_ds_len, s_ds_conv)
+
+## Take FFT of the reconstructed signal 
+recon_ft = np.abs(np.fft.fft(ds_conv_alt))
+recon_mag, recon_phase = ft.complex_to_phasor(recon_ft)
+recon_freq = np.fft.fftfreq(ds_conv_alt.size)
+recon_freq *= sample_rate
+
+################
+### Plotting ###
+################
+
+if(PLT_STD_TIME):
+  ## Figure 1
+  plt.figure(1,figsize=(8, 8))
+  ## BPSK time
+  plt.subplot(3,1,1)
+  plt.title("bpsk signal (time)")
+  plt.plot(d_bpsk_t[0:PLT_RANGE], d_bpsk[0:PLT_RANGE], 'b')
+  ## kernel time
+  plt.subplot(3,1,2)
+  plt.title("kernel (time)")
+  plt.plot(kernel_time, kernel_t,'r')
+  ## conv result time
+  plt.subplot(3,1,3)
+  plt.title("signal ** kernel")
+  plt.plot(conv_time[0:PLT_RANGE],conv[0:PLT_RANGE],'g')
+
+if(PLT_STD_FREQ):
+  ## Figure 2
+  plt.figure(2,figsize=(8, 8))
+  ## BPSK freq
+  plt.subplot(3,1,1)
+  plt.title("bpsk signal (freq)")
+  plt.plot(bpsk_freq, bpsk_mag, 'b')
+  ## kernel freq
+  plt.subplot(3,1,2)
+  plt.title("kernel (freq)")
+  plt.plot(kernel_freq, kernel_f,'r.')
+  ## conv result
+  plt.subplot(3,1,3)
+  plt.title("bpsk ** kernel")
+  plt.plot(conv_freq, conv_mag,'g')
+
+if(PLT_DS_TIME):
+  ### Figure 3
+  plt.figure(3,figsize=(8,8))
+  ## bandpass filter iFFT
+  plt.subplot(2,1,1) 
+  plt.title("bandpass filter (time response)")
+  plt.plot(k_ds_time, k_ds_t, 'b')
+  plt.xlabel("time(s)")
+  plt.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
+
+  ## bandpass filter real
+  plt.subplot(2,1,2)  
+  plt.title("bandpass filter (freq response)")
+  plt.plot(k_ds_freq, k_ds, 'k.')
+  plt.xlabel("frequency(Hz)")
+  plt.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
+
+if(PLT_RECON):
+  ### Figure 4
+  plt.figure(4,figsize=(8,8))
+  ## reconstructed convolution result time
+  plt.subplot(2,1,1) 
+  plt.title("reconstruction (time response)")
+  plt.plot(conv_time[0:PLT_RANGE], ds_conv_alt[0:PLT_RANGE], 'b')
+  plt.xlabel("time(s)")
+  plt.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
+
+  ## reconstructed convolution result freq
+  plt.subplot(2,1,2) 
+  plt.title("reconstruction (freq response)")
+  plt.plot(recon_freq, recon_mag, 'g')
+  plt.xlabel("time(s)")
+  plt.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
+
+## show plots
+plt.show()

@@ -1,0 +1,185 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import math as m
+from modules import BPSKGen
+from modules import SigUtil
+from modules import FilterGen
+
+# useful objects
+pi = np.pi
+s = SigUtil.SigUtil()
+b = BPSKGen.BPSKGen()
+f = FilterGen.FilterGen()
+
+###################
+### User Params ###
+###################
+
+N_periods = 1                         ## total number of periods of waveform
+N_paths = 4                           ## number of paths
+f0 = 100
+T0 = 1/ f0
+
+## total samples of waveform 
+## MUST BE divisible by N_paths
+Ns = 32                             
+
+##
+sample_factor = int(Ns/ N_periods)    ## number of samples per period
+sample_rate = f0 * sample_factor      ## number of samples per second
+##
+Nk = sample_factor                    ## total number of samples for the filter kernel
+Nds = int(Ns/ N_paths)                ## samples in 1/4 broken waveform
+Ndk = int(Nk/ N_paths)                ## samples in 1/4 broken filter kernel
+
+#######################
+### Signal Creation ###
+#######################
+
+## sinusoidal signal
+sig_time_range = T0 * N_periods
+time = np.linspace(0,T0 * N_periods, Ns)
+sig_phase_arg = 2 * pi * f0 * time
+sinu = np.sin(sig_phase_arg)
+
+# create moving average kernel
+# kernel length is one period of 'sinu'
+kernel_time_range = T0
+kernel_time = np.linspace(0,T0,Nk)
+kern_phase_arg = 2 * pi * f0 * kernel_time
+kernel = np.ones(Nk)
+kernel = kernel/ sum(kernel)
+
+## determine length of convolution signals + time arguments
+# length of convolution between signal and kernel
+conv_len = Ns + Nk - 1
+conv_time_range = sig_time_range + kernel_time_range
+
+# convolve signals together
+conv_time = np.linspace(0,conv_time_range,conv_len)
+conv = np.convolve(sinu,kernel)
+
+##############################################
+### Down sampled signal (padded) ** kernel ###
+##############################################
+
+
+# S(t) = s_a(t) + s_b(t) + s_c(t) + s_d(t)
+# H(t) ** S(t) = [ s_a(t)**H(t) + s_b(t)**H(t) + s_c(t)**H(t) + s_d(t)**H(t) ]
+
+# down-sampled-padded signals
+sa_dsp = np.zeros(Ns)
+sb_dsp = np.zeros(Ns)
+sc_dsp = np.zeros(Ns)
+sd_dsp = np.zeros(Ns)
+
+# populate down-sampled signal arrays
+for idx in range(len(sinu)):
+  if(idx % N_paths == 0): sa_dsp[idx] = sinu[idx]
+  if(idx % N_paths == 1): sb_dsp[idx] = sinu[idx]
+  if(idx % N_paths == 2): sc_dsp[idx] = sinu[idx]
+  if(idx % N_paths == 3): sd_dsp[idx] = sinu[idx]
+
+# convolve down-sampled signals with kernel
+sa_dsp_conv = np.convolve(sa_dsp, kernel)
+sb_dsp_conv = np.convolve(sb_dsp, kernel)
+sc_dsp_conv = np.convolve(sc_dsp, kernel)
+sd_dsp_conv = np.convolve(sd_dsp, kernel)
+
+sb_conv = sa_dsp_conv+sb_dsp_conv+sc_dsp_conv+sd_dsp_conv
+
+##################################################
+### Down sampled signal ** down-sampled kernel ###
+##################################################
+
+# down-sampled signals
+sa_ds = sinu[0::4]
+sb_ds = sinu[1::4]
+sc_ds = sinu[2::4]
+sd_ds = sinu[3::4]
+
+# down sample kernel by factor of number-of-paths
+k_ds = np.array(kernel[0::N_paths])
+
+# convolve down-sampled-unpacked signals with down-sampled-unpacked kernel
+sa_ds_conv = np.convolve(sa_ds, k_ds)
+sb_ds_conv = np.convolve(sb_ds, k_ds)
+sc_ds_conv = np.convolve(sc_ds, k_ds)
+sd_ds_conv = np.convolve(sd_ds, k_ds)
+
+# combine down-sampled-unpacked signals into one 2D array
+s_ds_conv = [sa_ds_conv, sb_ds_conv, sc_ds_conv, sd_ds_conv]
+
+# length of convolution between down-sampled signal / kernel
+ds_conv_len = Nds + Ndk - 1
+ds_sig_time_range = sig_time_range/ N_paths
+ds_conv_time_range = (sig_time_range+kernel_time_range)/N_paths
+ds_kernel_time_range = kernel_time_range/ N_paths
+
+# time arrays for down-sampled signal / down-sampled convolution
+ds_time = np.linspace(0, ds_sig_time_range, Nds)
+ds_conv_time = np.linspace(0, ds_conv_time_range, ds_conv_len)
+ds_k_t = np.linspace(0, ds_kernel_time_range, Ndk)
+
+print("kn len:", len(k_ds), " sa_ds len:", len(sa_ds), " sa_ds_conv len:", len(sa_ds_conv))
+
+# recombine
+ds_conv_alt = s.multi_lane_conv_recon_four(conv_len, ds_conv_len, s_ds_conv)
+
+print("Comparing down-sampled algorithm to direct conv")
+print("ds_conv_alt: ", ds_conv_alt[0:20])
+print("conv: ", conv[0:20])
+
+################
+### Plotting ###
+################
+
+color = ["b","r","g","m"]
+
+## Figure 1
+fig_1, axes_1 = plt.subplots(3,1,figsize=(8, 8))
+fig_1.suptitle("Full-Rate Signal/ Kernel/ Convolution")
+axes_1[0].plot(time, sinu, 'b.')
+axes_1[1].plot(kernel_time, kernel, 'r.')
+axes_1[2].plot(conv_time, conv, 'g')
+
+## Figure 2
+fig_2, axes_2 = plt.subplots(2,2,figsize=(8, 8))
+fig_2.suptitle("Down-sampled-padded signals")
+axes_2[0][0].plot(time, sa_dsp, 'b.')
+axes_2[0][1].plot(time, sb_dsp, 'r.')
+axes_2[1][0].plot(time, sc_dsp, 'g.')
+axes_2[1][1].plot(time, sd_dsp, 'm.')
+
+## Figure 3
+fig_3, axes_3 = plt.subplots(2,2,figsize=(8, 8))
+fig_3.suptitle("Down-sampled-padded signals ** kernel")
+axes_3[0][0].plot(ds_time, sa_ds, 'b.')
+axes_3[0][1].plot(ds_time, sb_ds, 'r.')
+axes_3[1][0].plot(ds_time, sc_ds, 'g.')
+axes_3[1][1].plot(ds_time, sd_ds, 'm.')
+
+## Figure 4
+fig_4, axes_4 = plt.subplots(2,2,figsize=(8, 8))
+fig_4.suptitle("down-sampled signal ** down-sampled kernel")
+axes_4[0][0].plot(ds_conv_time, sa_ds_conv, 'b.')
+axes_4[0][1].plot(ds_conv_time, sb_ds_conv, 'r.')
+axes_4[1][0].plot(ds_conv_time, sc_ds_conv, 'g.')
+axes_4[1][1].plot(ds_conv_time, sd_ds_conv, 'm.')
+
+## Figure 5
+fig_5, axes_5 = plt.subplots(2,1,figsize=(8, 8))
+fig_5.suptitle("down-sampled signal ** down-sampled kernel")
+axes_5[0].plot(conv_time, ds_conv_alt, 'b.')
+axes_5[0].plot(conv_time, conv, 'g.')
+axes_5[1].plot(ds_k_t, k_ds, 'k.')
+
+# ## Figure 5
+# plt.figure(5,figsize=(8, 8))
+# plt.subplot(2,1,1)
+# plt.plot(conv_time, ds_conv_alt, 'm.')
+# plt.plot(conv_time, conv,'g')
+# plt.subplot(2,1,2)
+# plt.plot(ds_k_t, k_ds, 'g.')
+
+plt.show()

@@ -1,0 +1,139 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import math as m
+from modules import BPSKGen
+from modules import SigUtil
+from modules import FilterGen
+from modules import FiltUtil
+
+
+## Directly generate bandpass filter with 
+##  given sample rate, sample count, center freq
+##  and bandwidth
+## Frequencies captured in DFT are: 
+##  DC, fs/2N, 2fs/2N, 3fs/2N, ... , Nfs/2N (fs/2)
+def gen_doublebp_filter_kernel(fc1, BW1, fc2, BW2, fs, Ns):
+
+    N2 = Ns // 2                  ## half of num samples (round down)
+    dN = fs / (2*N2)              ## step size in freq 
+
+    fhc_1 = fc1 + BW / 2          ## upper cutoff freq 1
+    flc_1 = fc1 - BW / 2          ## lower cutoff freq 1
+    ilc_1 = m.floor(flc_1 / dN)   ## high cutoff index  
+    ihc_1 = m.ceil(fhc_1 / dN)    ## low cutoff index
+
+    fhc_2 = fc2 + BW / 2          ## upper cutoff freq 2
+    flc_2 = fc2 - BW / 2          ## lower cutoff freq 2
+    ilc_2 = m.floor(flc_2 / dN)   ## high cutoff index  
+    ihc_2 = m.ceil(fhc_2 / dN)    ## low cutoff index
+
+    ## generate freq. domain pulse
+    ##  with given width
+    bpf_samp = []
+    for i in range(N2):
+        if(i == ihc_1 or i == ilc_1 or i == ihc_2 or i == ilc_2):
+            bpf_samp.append(0.5)
+        elif(i > ilc_1 and i < ihc_1):
+            bpf_samp.append(1)
+        elif(i > ilc_2 and i < ihc_2):
+            bpf_samp.append(1)
+        else:
+            bpf_samp.append(0)
+
+    ## mirror samples for negative frequency
+    bpf_mirror = np.flip(bpf_samp,0) 
+
+    ## Final format for freq domain:
+    ##  [DC, fs/2N -> ,[fs/2 + -fs/2], -fs(N-1)/2N -> -fs/2N]
+    bpf_ft = np.array( [0] + list(bpf_samp[0:N2-1]) + [bpf_samp[N2-1] + bpf_mirror[0]] + list(bpf_mirror[1:]))
+
+    ## generate frequency array following same form as above
+    bpf_freq = (dN) * np.linspace(1,N2,N2)
+    bpf_freq_mirror = -1 * np.flip(bpf_freq, 0)
+    bpf_freq = np.array( list([0]) + list(bpf_freq) + list(bpf_freq_mirror[1:]))
+
+    return bpf_ft, bpf_freq
+
+
+
+#############
+### Setup ###
+#############
+
+## plot settings
+PLT_FILT              = 1
+PLT_CARRIER           = 0
+PLT_CARRIER_FFT_COMP  = 1
+PLT_SPLIT_LANES       = 1
+
+## useful objects
+f = FilterGen.FilterGen()
+b = BPSKGen.BPSKGen()
+s = SigUtil.SigUtil()
+ft = FiltUtil.FiltUtil()
+
+#########################
+### Generate BP Filt  ###
+#########################
+
+## filter parameters
+N = 128                 ## number of samples in filter kernel
+N_lanes = 2             ## how many lanes of traffic are being generated
+fs = 307.2e6 * N_lanes  ## sample generation rate of system
+fc1 = 100e6             ## center freq. 1 
+fc2 = 200e6             ## center freq. 2
+BW = 20e6               ## bandwidth of filter 
+
+## kernel scaling
+Nd = 15
+Ndy = 2 * Nd 
+M = pow(2,Ndy) - 1      ## scaling factor for kernel values
+
+## generate single BPF kernel
+bpf, bpfreq = ft.single_bp_filter_kernel(fc1, BW, fs, N)
+
+## Generate double BPF kernel
+bpf_ft, bpf_freq = ft.gen_double_bp_filter_kernel(fc1, BW, fc2, BW, fs, N)
+
+## Take iFFT, generating the time-domain response
+bpf_td = np.fft.ifft(bpf)
+bpf_time = (1/fs) * np.array(list(np.linspace(1,N//2,N//2)) + list(np.linspace(-N//2,-1,N//2)))
+
+## scale time domain response for FPGA fractional mult
+bpf_td = bpf_td * M 
+
+strHex = []
+for i in range(N):
+    strHex.append("%0.4X" % int(bpf_td.real[i]))
+
+print("kernel values hex: \n ", strHex)
+print("kernel values decimal: \n ", bpf_td.real)
+
+
+################
+### Plotting ###
+################
+
+
+if(PLT_FILT):
+  ### Figure 1
+  plt.figure(1,figsize=(8,8))
+  ## bandpass filter FFT
+  plt.title("bandpass filter time-domain")
+  plt.plot(bpf_time, bpf_td, 'b')
+  plt.xlabel("time(s)")
+  #plt.xlim(-2*LP_FR,2*LP_FR)
+  plt.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
+
+  ### Figure 2
+  plt.figure(2, figsize=(8,8))
+  ## bandpass filter real
+  plt.subplot(2,2,1)  # top
+  plt.title("bandpass filter freq-domain")
+  plt.plot(bpf_freq, bpf_ft, 'k.')
+  plt.xlabel("frequency(Hz)")
+  plt.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
+
+
+## show plots
+plt.show()

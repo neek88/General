@@ -1,0 +1,250 @@
+import numpy as np
+import math as m
+
+class FiltUtil:
+
+  ## init the object with given signal-data resolution
+  def __init__(self, Nr=16):
+    # instance variables
+    self.Nr = Nr
+
+  ## create magnitude / phase from FFT
+  ##  mag = sqrt(r^2 + im^2)
+  ##  phase = arctan(im / r)
+  def complex_to_phasor(self,fft_complex): ###**###
+    ft_mag = np.sqrt((fft_complex.real **2) + (fft_complex.imag**2))
+    ft_phase = (180/m.pi) * np.arctan2(fft_complex.imag, fft_complex.real)
+    return ft_mag, ft_phase 
+
+  ## create complex fft from mag/ phase
+  ##  phase is assumed to be in radians
+  ##  Re = Mag * cos(phase)
+  ##  Im = Mag * sin(phase)
+  def phasor_to_complex(self,fft_mag, fft_phase): ###**###
+    re = []
+    im = []
+    for i in range(len(fft_mag)):
+      re.append(fft_mag[i] * m.cos(fft_phase[i]))
+      im.append(fft_mag[i] * m.sin(fft_phase[i]))
+    return re, im
+
+  ## organize complex data in array for 
+  ##  proper storage in a '.coe' file
+  def order_complex(self, re, im): ###**###
+    order = []
+    for i in range(len(re)):
+      order.append(int(2*re[i]))
+      order.append(int(2*im[i]))
+    return order
+
+  ## swaps first and second half of array
+  ##  returns data in np array format
+  def reorder_ifft(self, ifft): ###**###
+    return np.array(list(ifft[(len(ifft)//2):len(ifft)]) + list(ifft[0: len(ifft)//2]))
+
+  ## convert the kernel to power-of-two fractional representation
+  def discretize_kernel(self, filter_kernel):
+    ## scaling resolution/ factor
+    Ndy = 2 * (self.Nr - 1)
+    mult = pow(2,Ndy) - 1
+
+    disc_kernel = []
+    for i in range(len(filter_kernel)):
+      disc_kernel.append( m.floor(filter_kernel[i] * mult) / pow(2,Ndy) )
+
+    return disc_kernel
+
+  ## create filter kernel multiples
+  def generate_filt_mult(self, kernel):
+    Ndy = 2 * (self.Nr - 1)
+
+    # invert filter kernel / get indicies
+    kern_m = []
+    for i in range(len(kernel)):
+      kern_m.append(m.floor(kernel[i] * ((2**Ndy)-1) ))
+    
+    return kern_m
+
+  ## Filter the input signal N-samples at a time
+  ##   after each FFT, multiply the response by the filter kernel
+  ##   pack the response into a running FFT array
+  ##   take the inverse FFT of the FFT array's and return the filtered signal
+  ## kernel input must have length 'fft_len'
+  def rolling_fft_filter(self, signal, kernel, fft_len):
+    # check kernel length
+    if(len(kernel) != fft_len): return []
+
+    ## how many FFT runs do we need? 
+    ##  final run will potentially be cut short
+    ##  must pad with zeros
+    num_iter = m.ceil(len(signal)/ fft_len) 
+    fin_fft_len = len(signal) % fft_len 
+    padding = np.zeros(fft_len - fin_fft_len)
+
+    filt_signal = []
+
+    for i in range(num_iter):
+      # grab indicies into input signal
+      i_st = fft_len * i 
+      i_en = fft_len * (i+1)
+
+    ## last iteration uses a smaller FFT len
+    if(fin_fft_len != 0 and i == num_iter-1):
+      signal_slice = np.array(list(signal[i_st:]) + list(padding))
+    else:
+      signal_slice = signal[i_st:i_en]
+
+      # calculate FFT of the 'ith' set of N samples
+      fft_i = np.fft.fft(signal_slice)
+
+      # multiply each FFT array by the filter kernel
+      fft_i = fft_i * kernel 
+
+      # take the inverse FFT of each 'ith' set of N samples
+      ifft_i = np.fft.ifft(fft_i)
+      
+      # add to the running filtered signal
+      filt_signal = filt_signal + list(ifft_i)
+
+    return filt_signal
+
+  ## Directly generate bandpass filter with 
+  ##  given sample rate, sample count, center freq
+  ##  and bandwidth
+  ## Frequencies captured in DFT are: 
+  ##  DC, fs/2N, 2fs/2N, 3fs/2N, ... , Nfs/2N (fs/2)
+  def single_bp_filter_kernel(self, fc, BW, fs, num_samples):
+
+    N_2 = num_samples // 2      ## half of num samples (round down)
+    dN = fs / (2*N_2)           ## step size in freq 
+    ifc = fc // dN              ## center freq index
+    ibw = BW // (2 * dN) + 1        ## bandwidth relative index
+    ilc = ifc - ibw             ## lower cutoff freq
+    ihc = ifc + ibw             ## upper cutoff freq
+
+    ## generate freq. domain pulse
+    ##  with given width
+    bpf_samp = []
+    for i in range(N_2):
+      if(i > ilc and i < ihc):
+        bpf_samp.append(1)
+      else:
+        bpf_samp.append(0)
+
+    ## mirror samples for negative frequency
+    bpf_mirror = np.flip(bpf_samp,0) 
+
+    ## Final format for freq domain:
+    ##  [DC, fs/2N -> ,[fs/2 + -fs/2], -fs(N-1)/2N -> -fs/2N]
+    bpf_ft = np.array( [0] + list(bpf_samp[0:N_2-1]) + [bpf_samp[N_2-1] + bpf_mirror[0]] + list(bpf_mirror[1:]))
+
+    ## generate frequency array following same form as above
+    bpf_freq = (dN) * np.linspace(1,N_2,N_2)
+    bpf_freq_mirror = -1 * np.flip(bpf_freq, 0)
+    bpf_freq = np.array( list([0]) + list(bpf_freq) + list(bpf_freq_mirror[1:]))
+
+    return bpf_ft, bpf_freq
+
+  ## Directly generate bandpass filter with 
+  ##  given sample rate, sample count, center freq
+  ##  and bandwidth
+  ## Frequencies captured in DFT are: 
+  ##  DC, fs/2N, 2fs/2N, 3fs/2N, ... , Nfs/2N (fs/2)
+  def gen_double_bp_filter_kernel(self, fc1, BW1, fc2, BW2, fs, Ns):
+
+    N2 = Ns // 2                  ## half of num samples (round down)
+    dN = fs / (2*N2)              ## step size in freq 
+
+    fhc_1 = fc1 + BW1 / 2          ## upper cutoff freq 1
+    flc_1 = fc1 - BW1 / 2          ## lower cutoff freq 1
+    ilc_1 = m.floor(flc_1 / dN)   ## high cutoff index  
+    ihc_1 = m.ceil(fhc_1 / dN)    ## low cutoff index
+
+    fhc_2 = fc2 + BW2 / 2          ## upper cutoff freq 2
+    flc_2 = fc2 - BW2 / 2          ## lower cutoff freq 2
+    ilc_2 = m.floor(flc_2 / dN)   ## high cutoff index  
+    ihc_2 = m.ceil(fhc_2 / dN)    ## low cutoff index
+
+    ## generate freq. domain pulse
+    ##  with given width
+    bpf_samp = []
+    for i in range(N2):
+      if(i == ihc_1 or i == ilc_1 or i == ihc_2 or i == ilc_2):
+        bpf_samp.append(0.5)
+      elif(i > ilc_1 and i < ihc_1):
+        bpf_samp.append(1)
+      elif(i > ilc_2 and i < ihc_2):
+        bpf_samp.append(1)
+      else:
+        bpf_samp.append(0)
+
+    ## mirror samples for negative frequency
+    bpf_mirror = np.flip(bpf_samp,0) 
+
+    ## Final format for freq domain:
+    ##  [DC, fs/2N -> ,[fs/2 + -fs/2], -fs(N-1)/2N -> -fs/2N]
+    bpf_ft = np.array( [0] + list(bpf_samp[0:N2-1]) + [bpf_samp[N2-1] + bpf_mirror[0]] + list(bpf_mirror[1:]))
+
+    ## generate frequency array following same form as above
+    bpf_freq = (dN) * np.linspace(1,N2,N2)
+    bpf_freq_mirror = -1 * np.flip(bpf_freq, 0)
+    bpf_freq = np.array( list([0]) + list(bpf_freq) + list(bpf_freq_mirror[1:]))
+
+    return bpf_ft, bpf_freq
+
+  ## write filter data to coe file
+  ##    allows block RAM to store filter kernel
+  ##    for simulation testing
+  ## if filter has fractional data points, 
+  ##    they must be scaled to integers
+  ## Ns = number of samples (Nreal + Nimag)
+  def generate_filter_coe(self, file_name, filt_ft, filt_phase, Ns):
+    re, im = self.phasor_to_complex(filt_ft,filt_phase)
+    coe_data = self.order_complex(re,im)
+
+    file1 = open(file_name,"w")
+    file1.write("memory_initialization_radix=16;\n")
+    file1.write("memory_initialization_vector= ")
+
+    for i in range(len(coe_data)//Ns): 
+      strHex = []
+      for j in range(Ns):
+        strHex.append("%0.4X" % coe_data[(i*Ns)+j])
+      file1.write(" ")
+      for j in range(Ns):
+        file1.write(strHex[j])
+    file1.write(";")
+    file1.close()
+
+  ## formats hex data in FPGA syntax
+  def hex_vhdl_format(self, n):
+    #return "x\"" + "%x" % (int(n) & 0xffffffff) + "\""
+    #return "x\"" + "%x" % (int(n) & 0b111111111111111111111111111) + "\""
+    return "% s" % (int(n))
+
+  ## put kernel values in proper hex format
+  ##  for FPGA testing
+  def format_kernel_values(self, kernel, scale_factor):
+    ## scale time domain response for FPGA fractional mult
+    kernel = kernel * scale_factor 
+
+    ## write kernel data to formatted hex
+    strData = []
+    for i in range(len(kernel)):
+      kernel[i] = int(kernel[i])
+      strData.append(self.hex_vhdl_format(kernel[i]))
+    return strData
+
+  ## Generate filter test data 
+  def gen_format_kernel_data(self, file_name, str_data):
+    str_data = list(map(str, list(str_data)))
+    file1 = open(file_name,"w")
+    file1.write("(")
+    for i in range(len(str_data)):
+      file1.write(str_data[i])
+      if(i != len(str_data)-1):
+        file1.write(", ")
+      if(i % 8 == 0 and i != 0):
+        file1.write("\n")
+    file1.write(");")
+    file1.close()

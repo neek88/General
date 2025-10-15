@@ -1,0 +1,405 @@
+import numpy as np
+import math as m
+from modules import gps
+
+## Notes: 
+##  We are using numpy arrays
+##   - this way we can sum/ multiply them 
+##       together element wise 
+##   - they behave similar to MATLAB arrays
+##   - how to convert ? 
+##       list_1  = [a, b, c]
+##       np_list = np.array(list_1) -> ([a, b, c])
+
+class SigUtil: 
+    
+  ##########################
+  ### Global Static Data ###
+  ##########################
+
+  ############################
+  ### Function definitions ###
+  ############################
+
+  ## init the object with given signal-data resolution
+  def __init__(self, Nr=16):
+    # instance variables
+    self.Nr = Nr
+      
+  ## less than 
+  def SMLR(self, n, m):
+    if(n<m): return n
+    else:    return m
+
+  ## greater than
+  def GRTR(self,n,m): 
+    if(n>m): return n 
+    else:    return m
+
+  ## down sample signal by down-sample factor (Nds)
+  def down_sample_signal(self, signal, Nds):
+    signal_ds = []
+    for i in range(len(signal)):
+      if (i % Nds == 0): signal_ds.append(signal[i])
+    return signal_ds
+
+  ## split signal into 'Nds' paths
+  ##  numpy arrays are allowed as an input
+  def down_sample_split_path(self, signal, Nds):
+      
+    ## Ex: ##################
+    # s8,  s4, s0  ->  path 1
+    # s9,  s5, s1  ->  path 2
+    # s10, s6, s2  ->  path 3
+    # s11, s7, s3  ->  path 4
+
+    # each path is a separate list
+    s_ds = []
+    for path in range(Nds):
+      s_ds.append(list([]))   
+
+    # run through signal list, each path gets one sample
+    # then, go back to first path
+    for path in range(Nds):
+      for s in range(len(signal)):
+        if(s % Nds == path): s_ds[path].append(signal[s])
+    return s_ds
+
+  ## scale signal to digitized resolution
+  ## input signal must have range [-1: 1]
+  def scale_signal(self, signal, resolution):
+    ## determine scale factor and scale the signal
+    scale_factor = (2 ** (resolution-1))
+
+    ## keep signal inside of signed power-of-two range
+    for idx in range(len(signal)):
+      signal[idx] = int(signal[idx]*scale_factor)
+      if(signal[idx] > scale_factor-1): signal[idx] = scale_factor-1
+      elif(signal[idx] < -scale_factor): signal[idx] = -scale_factor
+
+  ## Forces  (boc_sampling_rate), (carrier_list_length), and (L1_PRN_MULT * sampling_factor) 
+  ##   to be integer values by changing the effective sampling rate 
+  def adjust_sample_rate(self,sampling_factor, f0, chipping_rate, boc_factor, prn_factor, chip_number):
+
+    f0_prn = f0 / (chipping_rate * prn_factor)           # ratio of f0 to PRN code chip rate
+    sr_int_flag = False 
+    cr_len_flag = False 
+    ca_stretch_flag = False 
+      
+    while(1):
+      sr_boc = sampling_factor * f0_prn / boc_factor             # BOC sampling rate 
+      carrier_len = f0_prn * chip_number * sampling_factor       # carrier list length 
+      ca_stretch  = f0_prn * sampling_factor                     # C/A code stretching factor 
+      boc_len = sr_boc * boc_factor * chip_number                # BOC list length (for reference)            
+      
+      # Check if above values are integers 
+      sr_int_flag = (sr_boc == m.ceil(sr_boc))
+      cr_len_flag = (carrier_len == m.ceil( carrier_len) )
+      ca_stretch_flag  = (ca_stretch  == m.ceil(ca_stretch))
+      
+      if(sr_int_flag and cr_len_flag and ca_stretch_flag):
+        return int(sr_boc),int(sampling_factor)
+      else:
+        sampling_factor += 1
+
+  ## create C/A code array, stretched to length of carrier
+  def generate_ca_code(self,chip_number, cycles_per_chip, sample_factor):
+      
+    # Generate GPS C/A Code 
+    ca = gps.generate_prn(1,chip_number)
+
+    # Stretch C/A code out by factor of length difference to carrier 
+    # chip length: cycles_per_chip * sample_rate
+    c_a = []
+    for i in ca:
+      for j in range(int(cycles_per_chip*sample_factor)):
+        c_a.append(i)
+    return c_a
+  
+  ## create C/A code array, stretched to length of carrier
+  def gen_ca_code(self,chip_number, prn_sample_factor):
+      
+    # Generate GPS C/A Code 
+    ca = gps.generate_prn(1,chip_number)
+
+    # Stretch C/A code out by factor of length difference to carrier 
+    # chip length: cycles_per_chip * sample_rate
+    c_a = []
+    for i in ca:
+        for j in range(int(prn_sample_factor)):
+            c_a.append(i)
+    return c_a
+
+  ## generate boc code from sample_factor, chip_number, phase
+  def gen_boc_code(self, boc_phase, boc_chip_number, boc_rate, sample_rate):
+    sample_factor = int(sample_rate / boc_rate)
+    # generate boc +1/ -1 signal
+    boc = []
+    for i in range(boc_chip_number):
+      if(boc_phase == 0):     # sin phase (start at -1)
+        for j in range(sample_factor):
+          if(i % 2 == 0): boc.append(-1)
+          else:           boc.append(1)
+      else:                   # cosine phase (start at +1)
+        for j in range(sample_factor):
+          if(i % 2 == 0): boc.append(1)
+          else:           boc.append(-1)
+    return boc
+
+  ## convert binary (1/0) square wave to (+1/ -1)
+  def conv_square(self, x_n):
+    # return sign of original waveform
+    x_n = np.sign(x_n)
+
+    # Fix the zero values in the waveform  
+    prev = 0
+    for i in range(len(x_n)):
+      curr = x_n[i]
+      if(curr == 0 and prev == 1):
+          x_n[i] = 1
+      elif(curr == 0 and prev == -1):
+          x_n[i] = -1
+      elif(curr == 0 and prev == 0):
+          x_n[i] = 1
+      prev = curr 
+    return x_n
+
+
+  ## emulate fractional multiplication in FPGA
+  ##  - done by over-scaling y_m and right shifting
+  ##    the product x_n*y_m
+  def fpga_fractional_mult(self, x_n, y_m):
+    # -  We have a 16-bit number (x_n) being divided by upto a 
+    #     15 bit number (y_m). The technique here is to multiply
+    #     our input data by (2^30 -1)/ (y_m), then right shift by 30
+    # - multiplying a 16 bit number by a 30 bit number produces a 46 bit
+    #     number. Right shifting a 46 bit number by 30 produces a 16 bit number
+    # - x / y = x * (1/y) = ( x * [(2^Ndy - 1) / y] ) >> Ndy
+
+    # determine multiplier for input sample
+    Nd = 15       ## max right shift for samples
+    Ndy = 2 * Nd            ## proper scaling resolution
+    y_i = m.floor(y_m * (pow(2,Ndy) - 1))
+
+    ## compute multiplication, followed by right shift 
+    res = int(x_n * y_i) >> Ndy 
+    return res 
+
+  ## convolve two signals of length 'n' and 'm'
+  ## y_m is 'flipped' and shifted across x_n
+  def convolve(self,x_n, y_m):
+    n = len(x_n)
+    m = len(y_m)
+
+    OVERLAP_MAX = self.SMLR(n,m)
+    OVERLAP_HOLD = self.GRTR(n,m)-self.SMLR(n,m)+1
+
+    # keep track of state of waveform overlaps
+    overlap = 0
+    overlap_flag = 0
+    overlap_hold_cnt = 0
+
+    # starting index of array 'x'
+    omi_x = 0
+    # ending index of array 'y'
+    omi_y = 0
+
+    # result is of length N + M - 1
+    conv = np.zeros(n+m-1)
+
+    # are we in overlap state? 
+    for i in range(len(conv)):
+
+      # When we reach overlap state, we've already 
+      #  calculated '1' overlap term, so reduce overlap_hold_cnt by '1'
+      if(overlap == OVERLAP_MAX):
+        if(overlap_hold_cnt < OVERLAP_HOLD-1):
+          overlap_flag = 1
+          overlap_hold_cnt += 1
+        else:   # passed overlap_max ? 
+          overlap_flag = -1
+
+      # count until overlap flag is set
+      if(overlap_flag == 0): 
+        overlap += 1
+      elif(overlap_flag == -1):
+        overlap -= 1
+
+      for j in range(overlap):
+        # multiply array indicies starting at end of y_m and 
+        #  beginning of x_n
+        #                     <-- *      
+        #   [0][1][2][3][4][5][6][7]            x_n[]
+        #         [7][6][5][4][3][2][1][0]      y_m[]
+        #                     <-- *  
+        conv[i] += (x_n[omi_x-j] * y_m[omi_y-overlap+1+j])
+
+      # incriment starting index of array-x
+      if( omi_x < (n-1)):
+        omi_x += 1 
+      # incriment ending index of array-y
+      if( omi_y < (m-1)):
+        omi_y += 1
+
+    return conv
+
+  # - convolve two signals of length 'n' and 'm'
+  #   h_m is 'flipped' and shifted across x_n
+  # - fractional multiplication is done how 
+  #   an FPGA would do it through power of two
+  #   sum approximation
+  # - h_m is assumed to be 'kernel' getting
+  #   converted to power of two
+  def fpga_convolve(self, x_n, h_m):
+    n = len(x_n)
+    m = len(h_m)
+
+    # ## invert kernel values
+    # hm_i = self.inv_kernel(h_m)
+
+    OVERLAP_MAX = self.SMLR(n,m)
+    OVERLAP_HOLD = self.GRTR(n,m)-self.SMLR(n,m)+1
+
+    # keep track of state of waveform overlaps
+    overlap = 0
+    overlap_flag = 0
+    overlap_hold_cnt = 0
+
+    # starting index of array 'x'
+    omi_x = 0
+    # ending index of array 'h'
+    omi_h = 0
+
+    # result is of length N + M - 1
+    conv = np.zeros(n+m-1)
+
+    # are we in overlap state? 
+    for i in range(len(conv)):
+
+      # When we reach overlap state, we've already 
+      #  calculated '1' overlap term, so reduce overlap_hold_cnt by '1'
+      if(overlap == OVERLAP_MAX):
+          if(overlap_hold_cnt < OVERLAP_HOLD-1):
+              overlap_flag = 1
+              overlap_hold_cnt += 1
+          else:   # passed overlap_max ? 
+              overlap_flag = -1
+
+      # count until overlap flag is set
+      if(overlap_flag == 0): 
+        overlap += 1
+      elif(overlap_flag == -1):
+        overlap -= 1
+
+      for j in range(overlap):
+        # multiply array indicies starting at end of n_n and 
+        #  beginning of k_m
+        #                     <-- *      
+        #   [0][1][2][3][4][5][6][7]            x_n[]
+        #         [7][6][5][4][3][2][1][0]      k_m[]
+        #                     <-- *  
+        conv[i] += self.fpga_fractional_mult(x_n[omi_x-j], h_m[omi_h-overlap+1+j])
+
+      # incriment starting index of array-x
+      if( omi_x < (n-1)):
+        omi_x += 1 
+      # incriment ending index of array-y
+      if( omi_h < (m-1)):
+        omi_h += 1
+
+    return conv
+
+  ## Take FFT of each down-sampled path
+  ##  take Nf-point FFT on Nf-point signal
+  def fft_down_sampled_paths(self, s_ds, Np, Nf):
+    ## convert to numpy array
+    s_ds = np.array(s_ds)
+    f_ds = []
+    for path in range(Np): 
+        f_ds.append(np.fft.fft(s_ds[path]))
+    f_ds_freq = np.fft.fftfreq(s_ds[0].size)
+    return f_ds, f_ds_freq
+
+  ## Take iFFT of each down-sampled path
+  ##  take Nf-point iFFT on Nf-point signal
+  def ifft_down_sampled_paths(self, f_ds, Np, Nf):
+    ## convert to numpy array
+    f_ds = np.array(f_ds)
+    if_ds = []
+    for path in range(Np): 
+        if_ds.append(np.fft.ifft(f_ds[path]))
+    return if_ds
+
+  ## Filter down-sampled paths
+  ##    multiply path by kernel
+  ## down-sampled path-len must equal kernel len
+  def filter_down_sampled_paths(self, f_ds, kernel, Np): ###**###
+    if(len(f_ds[0]) != len(kernel)): return []
+
+    for i in range(Np):
+        f_ds[i] = np.array(f_ds[i]) * np.array(kernel)
+
+    return f_ds
+
+  ## splice signals together after downsampling
+  def splice_down_sampled_paths(self, s_ds, Np):
+    ss = []
+    Ns = len(s_ds[0])
+
+    for s in range(Ns):
+        for path in range(Np):
+            ss.append(s_ds[path][s])
+    return ss
+  
+  ## reconstruct convolution data split across multiple paths 
+  ##  Nl - number of lanes of traffic (fixed at four)
+  ##  conv_len - length of the reconstructed
+  ##  s_ds_conv - two-dimensional array of convolution data
+  ##    split across 'Nl' lanes
+  ## Golden Algorithm for four-lanes of traffic
+  def multi_lane_conv_recon_four(self, conv_len, ds_conv_len, s_ds_conv):
+    ds_conv_alt = np.zeros(conv_len)
+    Nl = 4
+    for i in range(ds_conv_len+1):
+      if(i == 0):             ## ramp up
+        ds_conv_alt[i] = s_ds_conv[0][i] + 0
+        ds_conv_alt[i+1] = s_ds_conv[0][i] + s_ds_conv[1][i] + 0
+        ds_conv_alt[i+2] = s_ds_conv[0][i] + s_ds_conv[1][i] + s_ds_conv[2][i] + 0
+        ds_conv_alt[i+3] = s_ds_conv[0][i] + s_ds_conv[1][i] + s_ds_conv[2][i] + s_ds_conv[3][i]
+      elif(i == ds_conv_len): ## ramp down
+        ds_conv_alt[Nl*i]   = 0 + s_ds_conv[1][i-1] + s_ds_conv[2][i-1] + s_ds_conv[3][i-1]
+        ds_conv_alt[Nl*i+1] = 0 + s_ds_conv[2][i-1] + s_ds_conv[3][i-1]
+        ds_conv_alt[Nl*i+2] = 0 + s_ds_conv[3][i-1]
+      else:                   ## stream
+        ds_conv_alt[Nl*i]   = s_ds_conv[0][i] + s_ds_conv[1][i-1] + s_ds_conv[2][i-1] + s_ds_conv[3][i-1]
+        ds_conv_alt[Nl*i+1] = s_ds_conv[0][i] + s_ds_conv[1][i]   + s_ds_conv[2][i-1] + s_ds_conv[3][i-1]
+        ds_conv_alt[Nl*i+2] = s_ds_conv[0][i] + s_ds_conv[1][i]   + s_ds_conv[2][i]   + s_ds_conv[3][i-1]
+        ds_conv_alt[Nl*i+3] = s_ds_conv[0][i] + s_ds_conv[1][i]   + s_ds_conv[2][i]   + s_ds_conv[3][i]
+    return ds_conv_alt
+
+  ## Alternate algorithm from above
+  ## reconstruct convolution data split across multiple paths 
+  ##  Nl - number of lanes of traffic
+  ##  conv_len - length of reconstructed convolution path
+  ##  ds_conv_len - length of the down sampled convolution path
+  ##  s_ds_conv - two-dimensional array of convolution data
+  ##    split across 'Nl' lanes
+  ## Golden Algorithm for four-lanes of traffic
+  def multi_lane_conv_recon(self, Nl, conv_len, ds_conv_len,  s_ds_conv):
+    ds_conv_alt = np.zeros(conv_len)
+    prev_val = 0
+    for i in range(ds_conv_len+1):
+      if(i == 0):          ## ramp up
+        for path in range(Nl):
+          ds_conv_alt[i+path] = prev_val + s_ds_conv[path][i]
+          #prev_val = ds_conv_alt[i+path]
+      elif(i < ds_conv_len):  ## stream
+        for path in range(Nl):
+          ds_conv_alt[Nl*i+path] = -s_ds_conv[path][i-1] + s_ds_conv[path][i] + ds_conv_alt[Nl*i+(path-1)]
+          #prev_val = ds_conv_alt[Nl*i+path]
+      else:                ## ramp down
+        for path in range(Nl):
+          ds_conv_alt[Nl*i+path] = -s_ds_conv[path][i-1] + ds_conv_alt[Nl*i+(path-1)]
+          #prev_val = ds_conv_alt[Nl*i+path]
+    
+    return ds_conv_alt
